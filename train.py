@@ -3,46 +3,56 @@ import torch
 import torchaudio
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
-from torchaudio.datasets import SPEECHCOMMANDS
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
+import glob
 
-# --- Визначення моделі ---
-class AudioClassifier(nn.Module):
-    def __init__(self, num_classes=4):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.bn3 = nn.BatchNorm2d(64)
-        self.pool = nn.MaxPool2d(2)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.5)
-
-        # Adaptive pooling -> фіксований розмір перед FC
-        self.gap = nn.AdaptiveAvgPool2d((8, 4))
-        self.fc1 = nn.Linear(64 * 8 * 4, 128)
-        self.fc2 = nn.Linear(128, num_classes)
-
-    def forward(self, x):
-        x = self.pool(self.relu(self.bn1(self.conv1(x))))
-        x = self.pool(self.relu(self.bn2(self.conv2(x))))
-        x = self.pool(self.relu(self.bn3(self.conv3(x))))
-        x = self.gap(x)  # робимо фіксований розмір
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(self.dropout(x)))
-        x = self.fc2(self.dropout(x))
-        return x
-
+# --- Кастомний Dataset для вашої структури ---
+class CustomSpeechCommands(Dataset):
+    def __init__(self, data_dir, classes, subset='training'):
+        self.data_dir = data_dir
+        self.classes = classes
+        self.subset = subset
+        self.filepaths = []
+        self.labels = []
+        
+        # Шлях до ваших даних
+        base_path = os.path.join(data_dir, 'SpeechCommands', 'speech_commands_v0.02')
+        
+        for class_name in classes:
+            # Шукаємо всі аудіо файли для цього класу
+            pattern = os.path.join(base_path, class_name, '*.wav')
+            files = glob.glob(pattern)
+            
+            for file_path in files:
+                self.filepaths.append(file_path)
+                self.labels.append(class_name)
+        
+        print(f"📁 Завантажено {len(self.filepaths)} файлів для {subset}")
+    
+    def __len__(self):
+        return len(self.filepaths)
+    
+    def __getitem__(self, idx):
+        file_path = self.filepaths[idx]
+        label = self.labels[idx]
+        
+        try:
+            # Завантажуємо аудіо файл
+            waveform, sample_rate = torchaudio.load(file_path)
+            return waveform, sample_rate, label, "speaker_0", 0
+        except Exception as e:
+            print(f"❌ Помилка завантаження {file_path}: {e}")
+            # Повертаємо dummy data у разі помилки
+            dummy_audio = torch.zeros(1, 16000)
+            return dummy_audio, 16000, label, "speaker_0", 0
 
 # --- Параметри ---
 target_classes = ['yes', 'no', 'up', 'down']
 num_classes = len(target_classes)
-batch_size = 32
-epochs = 5
+batch_size = 16  # Зменшено для CI/CD
+epochs = 2
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -60,53 +70,48 @@ def label_to_index(word):
 # --- Collate function ---
 def collate_fn(batch):
     tensors, targets = [], []
-    max_len = max(x[0].shape[1] for x in batch)  # максимальна довжина хвилі
     
     for waveform, sample_rate, label, speaker_id, utterance_number in batch:
-        # паддінг waveform до max_len
-        if waveform.shape[1] < max_len:
-            pad_size = max_len - waveform.shape[1]
-            waveform = torch.nn.functional.pad(waveform, (0, pad_size))
-
-        # перетворення в мел-спектрограму
+        # Перетворення в мел-спектрограму
         spec = mel_spectrogram(waveform).squeeze(0)  # [64, time]
         tensors.append(spec)
-        targets.append(label_to_index(label))  # мапимо слово в індекс
+        targets.append(label_to_index(label))
     
-    # додаємо вимір "канал"
-    return torch.stack(tensors).unsqueeze(1), torch.stack(targets)
-
-
-# --- ОБМЕЖЕНЕ завантаження даних ---
-def get_limited_dataset(subset, samples_per_class=500):
-    dataset = SPEECHCOMMANDS(root="./data", download=True, subset=subset)
+    # Знаходимо максимальну довжину для padding
+    max_time = max(spec.shape[1] for spec in tensors)
     
-    class_counts = {cls: 0 for cls in target_classes}
-    selected_indices = []
+    # Padding всіх спектрограм до однакової довжини
+    padded_tensors = []
+    for spec in tensors:
+        if spec.shape[1] < max_time:
+            pad_size = max_time - spec.shape[1]
+            spec = torch.nn.functional.pad(spec, (0, pad_size))
+        padded_tensors.append(spec)
     
-    for idx in range(len(dataset)):
-        waveform, sample_rate, label, speaker_id, utterance_number = dataset[idx]
-        
-        if label in target_classes and class_counts[label] < samples_per_class:
-            selected_indices.append(idx)
-            class_counts[label] += 1
-            
-        if all(count >= samples_per_class for count in class_counts.values()):
-            break
+    return torch.stack(padded_tensors).unsqueeze(1), torch.stack(targets)
+
+# --- Завантаження даних ---
+def get_limited_dataset(subset, samples_per_class=50):
+    """Завантажує дані з вашої структури папок"""
+    dataset = CustomSpeechCommands('./data', target_classes, subset=subset)
     
-    print(f"Selected {len(selected_indices)} samples for {subset} set")
-    print(f"Class distribution: {class_counts}")
+    # Обмежуємо кількість зразків для швидшого тренування
+    if samples_per_class < len(dataset):
+        # Просто беремо перші N зразків
+        indices = list(range(min(samples_per_class * len(target_classes), len(dataset))))
+        from torch.utils.data import Subset
+        return Subset(dataset, indices)
     
-    return Subset(dataset, selected_indices)
+    return dataset
 
+print("Loading datasets...")
+train_set = get_limited_dataset('training', samples_per_class=50)
+test_set = get_limited_dataset('testing', samples_per_class=20)
 
-print("Loading limited datasets...")
-train_set = get_limited_dataset('training', samples_per_class=400)
-test_set = get_limited_dataset('testing', samples_per_class=100)
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
-train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True)
-test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True)
-
+print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
 # --- Ініціалізація моделі, критерію, оптимізатора ---
