@@ -3,7 +3,7 @@ import torch
 import torchaudio
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 import numpy as np
 import json
 import glob
@@ -35,7 +35,7 @@ class AudioClassifier(nn.Module):
         x = self.fc2(self.dropout(x))
         return x
 
-# --- Кастомний Dataset з кращою обробкою помилок ---
+# --- Кастомний Dataset для вашої структури ---
 class CustomSpeechCommands(Dataset):
     def __init__(self, data_dir, classes, subset='training'):
         self.data_dir = data_dir
@@ -85,7 +85,7 @@ class CustomSpeechCommands(Dataset):
         if len(self.filepaths) == 0:
             print("🚨 УВАГА: Не знайдено жодного аудіо файлу!")
             print("📂 Доступні файли в data/:")
-            os.system(f"find {data_dir} -type f -name '*.wav' | head -20")
+            os.system(f"find {data_dir} -type f | head -20")
 
     def __len__(self):
         return len(self.filepaths)
@@ -106,6 +106,35 @@ class CustomSpeechCommands(Dataset):
             dummy_audio = torch.randn(1, samples) * 0.1
             return dummy_audio, 16000, label, "speaker_0", 0
 
+# --- Синтетичний Dataset ---
+class SyntheticDataset(Dataset):
+    def __init__(self, num_samples=200, num_classes=4):
+        self.num_samples = num_samples
+        self.num_classes = num_classes
+        print(f"🎲 Створено синтетичний dataset з {num_samples} зразками")
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        # Генеруємо синтетичні аудіо дані
+        duration = 1.0
+        samples = int(16000 * duration)
+        
+        # Різні частоти для різних класів
+        class_idx = idx % self.num_classes
+        frequencies = [440, 523, 659, 392]  # Ля, До, Мі, Соль
+        freq = frequencies[class_idx]
+        
+        t = torch.linspace(0, duration, samples)
+        audio_data = 0.5 * torch.sin(2 * np.pi * freq * t)
+        waveform = audio_data.unsqueeze(0)  # [1, samples]
+        
+        labels = ['yes', 'no', 'up', 'down']
+        label = labels[class_idx]
+        
+        return waveform, 16000, label, "synthetic_speaker", idx
+
 # --- Параметри ---
 target_classes = ['yes', 'no', 'up', 'down']
 num_classes = len(target_classes)
@@ -125,8 +154,8 @@ mel_spectrogram = torchaudio.transforms.MelSpectrogram(
 def label_to_index(word):
     return torch.tensor(target_classes.index(word))
 
-# --- Collate function ---
-def collate_fn(batch):
+# --- Collate function для реальних даних ---
+def real_data_collate_fn(batch):
     tensors, targets = [], []
     
     for waveform, sample_rate, label, speaker_id, utterance_number in batch:
@@ -136,6 +165,7 @@ def collate_fn(batch):
         targets.append(label_to_index(label))
     
     if not tensors:
+        # Повертаємо пусті тензори, якщо немає даних
         return torch.tensor([]), torch.tensor([])
     
     # Знаходимо максимальну довжину для padding
@@ -151,20 +181,29 @@ def collate_fn(batch):
     
     return torch.stack(padded_tensors).unsqueeze(1), torch.stack(targets)
 
+# --- Collate function для синтетичних даних ---
+def synthetic_data_collate_fn(batch):
+    tensors, targets = [], []
+    
+    for waveform, sample_rate, label, speaker_id, utterance_number in batch:
+        # Перетворення в мел-спектрограму
+        spec = mel_spectrogram(waveform).squeeze(0)  # [64, time]
+        tensors.append(spec)
+        targets.append(label_to_index(label))
+    
+    # Для синтетичних даних всі спектрограми однакової довжини
+    return torch.stack(tensors).unsqueeze(1), torch.stack(targets)
+
 # --- Завантаження даних ---
 def get_limited_dataset(subset, samples_per_class=50):
     """Завантажує дані з вашої структури папок"""
     dataset = CustomSpeechCommands('./data', target_classes, subset=subset)
     
-    # Якщо немає даних, створюємо синтетичні
+    # Якщо немає реальних даних, використовуємо синтетичні
     if len(dataset) == 0:
-        print("🚨 Створюю синтетичні дані для тестування...")
-        from torch.utils.data import TensorDataset
-        # Створюємо synthetic data
-        num_samples = samples_per_class * len(target_classes)
-        dummy_inputs = torch.randn(num_samples, 1, 64, 32)
-        dummy_labels = torch.randint(0, len(target_classes), (num_samples,))
-        return TensorDataset(dummy_inputs, dummy_labels)
+        print(f"🚨 Використовую синтетичні дані для {subset}")
+        return SyntheticDataset(num_samples=samples_per_class * len(target_classes), 
+                              num_classes=len(target_classes))
     
     # Обмежуємо кількість зразків для швидшого тренування
     if samples_per_class * len(target_classes) < len(dataset):
@@ -184,17 +223,25 @@ if len(train_set) == 0:
     print("❌ CRITICAL: No training data available!")
     exit(1)
 
+# Вибираємо правильну collate_fn в залежності від типу даних
+if isinstance(train_set, SyntheticDataset):
+    collate_fn = synthetic_data_collate_fn
+    print("🎲 Використовую collate_fn для синтетичних даних")
+else:
+    collate_fn = real_data_collate_fn
+    print("📁 Використовую collate_fn для реальних даних")
+
 train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
 print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
-# --- Решта коду залишається незмінною ---
-# Ініціалізація моделі, тренування, збереження...
+# --- Ініціалізація моделі, критерію, оптимізатора ---
 model = AudioClassifier(num_classes=num_classes).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
+# --- Цикл навчання ---
 print("Starting training...")
 for epoch in range(epochs):
     model.train()
@@ -204,6 +251,7 @@ for epoch in range(epochs):
     
     for i, (inputs, labels) in enumerate(train_loader):
         if len(inputs) == 0:
+            print("⚠️ Пропускаємо порожній batch")
             continue
             
         inputs, labels = inputs.to(device), labels.to(device)
@@ -269,5 +317,14 @@ with open('class_info.json', 'w') as f:
     json.dump({
         'target_classes': target_classes
     }, f)
+
+# Запис логів тренування
+with open('training.log', 'w') as f:
+    f.write(f"Training completed successfully!\n")
+    f.write(f"Final Test Accuracy: {test_accuracy:.2f}%\n")
+    f.write(f"Final Test Loss: {avg_test_loss:.4f}\n")
+    f.write(f"Epochs: {epochs}\n")
+    f.write(f"Batch size: {batch_size}\n")
+    f.write(f"Device: {device}\n")
 
 print("Training completed successfully!")
