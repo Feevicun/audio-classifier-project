@@ -74,14 +74,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Cache Docker layers
-      uses: actions/cache@v3
-      with:
-        path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
-    
     - name: Generate model version
       id: version
       run: |
@@ -91,27 +83,35 @@ jobs:
         echo "version=${TIMESTAMP}-${COMMIT_SHA_SHORT}" >> $GITHUB_OUTPUT
     
     - name: Build training image
+      id: build-train
       uses: docker/build-push-action@v5
       with:
         context: .
         file: ./docker/Dockerfile.train
-        tags: ${{ env.IMAGE_NAME_TRAIN }}:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        outputs: type=docker,dest=/tmp/train-image.tar
+        tags: train-image:latest
         load: true
+        outputs: type=docker,dest=/tmp/train-image.tar
+    
+    - name: Load training image
+      run: |
+        echo "📦 Loading training image..."
+        docker load --input /tmp/train-image.tar
+        docker images | grep train-image
     
     - name: Train model
       id: train
       run: |
         echo "🚀 Starting model training..."
         
-        # Запускаємо тренування
+        # Створюємо папку для моделі
+        mkdir -p models
+        
+        # Запускаємо тренування з локального образу
         docker run --rm \
           -v $(pwd)/models:/app/models \
           -v $(pwd)/data:/app/data \
           -e EPOCHS=${{ github.event.inputs.training_epochs || '2' }} \
-          ${{ env.IMAGE_NAME_TRAIN }}:latest
+          train-image:latest
         
         # Перевіряємо результати тренування
         if [ -f "models/model.pth" ]; then
@@ -177,13 +177,9 @@ jobs:
       with:
         context: .
         file: ./docker/Dockerfile.inference
-        tags: |
-          ${{ env.IMAGE_NAME_INFERENCE }}:latest
-          ${{ env.IMAGE_NAME_INFERENCE }}:${{ needs.train-model.outputs.model-version }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        outputs: type=docker,dest=/tmp/inference-image.tar
+        tags: inference-image:latest
         load: true
+        outputs: type=docker,dest=/tmp/inference-image.tar
     
     - name: Save inference image as artifact
       uses: actions/upload-artifact@v4
@@ -271,9 +267,19 @@ jobs:
         name: ${{ env.MODEL_ARTIFACT_NAME }}
         path: ./
     
+    - name: Build inference image locally
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile.inference
+        tags: inference-image:latest
+        load: true
+        outputs: type=docker,dest=/tmp/inference-image.tar
+    
     - name: Load inference image
       run: |
         docker load --input /tmp/inference-image.tar
+        docker images | grep inference-image
     
     - name: Install benchmark dependencies
       run: |
@@ -284,8 +290,8 @@ jobs:
       run: |
         echo "⚡ Starting performance benchmark..."
         
-        # Запускаємо сервер у фоні
-        docker run -d --name inference-server -p 5000:5000 ${{ env.IMAGE_NAME_INFERENCE }}:latest
+        # Запускаємо сервер у фоні з локального образу
+        docker run -d --name inference-server -p 5000:5000 inference-image:latest
         
         # Чекаємо на готовність сервера
         echo "⏳ Waiting for server to start..."
@@ -372,8 +378,6 @@ jobs:
         tags: |
           ${{ env.REGISTRY }}/${{ github.repository }}-inference:latest
           ${{ env.REGISTRY }}/${{ github.repository }}-inference:${{ needs.train-model.outputs.model-version }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
         labels: |
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           org.opencontainers.image.revision=${{ github.sha }}
