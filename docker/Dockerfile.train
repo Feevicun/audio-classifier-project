@@ -1,32 +1,27 @@
-# Multi-stage build for training
-FROM python:3.10-slim as builder
+FROM python:3.10-slim
 
 WORKDIR /app
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc g++ make git curl \
     libsndfile1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code
 COPY . .
 
-FROM python:3.10-slim as trainer
+# Create models directory
+RUN mkdir -p models
 
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y \
-    libsndfile1 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app /app
-
+# Environment variables
 ENV PYTHONPATH=/app
 ENV EPOCHS=2
 
+# Command to train model
 CMD ["python", "train.py"]
