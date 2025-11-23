@@ -1,0 +1,302 @@
+name: ML Training and Deployment Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+  
+  pull_request:
+    branches: [ main, master ]
+  
+  workflow_dispatch:
+    inputs:
+      training_epochs:
+        description: 'Number of training epochs'
+        required: true
+        default: '2'
+        type: string
+      skip_training:
+        description: 'Skip training phase'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME_TRAIN: ${{ github.repository }}-train
+  IMAGE_NAME_INFERENCE: ${{ github.repository }}-inference
+  MODEL_ARTIFACT_NAME: trained-model
+
+jobs:
+  # Job 1: Тренування моделі
+  train-model:
+    name: Train ML Model
+    runs-on: ubuntu-latest
+    outputs:
+      model-version: ${{ steps.version.outputs.model-version }}
+      training-status: ${{ steps.train.outputs.training-status }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Generate model version
+      id: version
+      run: |
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        COMMIT_SHA_SHORT=${GITHUB_SHA:0:8}
+        echo "model-version=v${TIMESTAMP}-${COMMIT_SHA_SHORT}" >> $GITHUB_OUTPUT
+    
+    - name: Build training image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile.train
+        tags: ${{ env.IMAGE_NAME_TRAIN }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        outputs: type=docker,dest=/tmp/train-image.tar
+    
+    - name: Train model
+      id: train
+      run: |
+        # Завантажуємо образ
+        docker load --input /tmp/train-image.tar
+        
+        # Запускаємо тренування
+        docker run --rm \
+          -v $(pwd)/models:/app/models \
+          -e EPOCHS=${{ github.event.inputs.training_epochs || '2' }} \
+          ${{ env.IMAGE_NAME_TRAIN }}:latest \
+          python train.py
+        
+        # Перевіряємо чи модель створена
+        if [ -f "models/model.pth" ]; then
+          echo "training-status=success" >> $GITHUB_OUTPUT
+          echo "✅ Model trained successfully"
+        else
+          echo "training-status=failed" >> $GITHUB_OUTPUT
+          echo "❌ Model training failed"
+          exit 1
+        fi
+    
+    - name: Upload trained model
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.MODEL_ARTIFACT_NAME }}
+        path: |
+          models/
+          class_info.json
+          training.log
+        retention-days: 30
+
+  # Job 2: Білд inference сервера
+  build-inference:
+    name: Build Inference Server
+    runs-on: ubuntu-latest
+    needs: train-model
+    if: needs.train-model.outputs.training-status == 'success'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download trained model
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.MODEL_ARTIFACT_NAME }}
+        path: ./
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build inference image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile.inference
+        tags: |
+          ${{ env.IMAGE_NAME_INFERENCE }}:latest
+          ${{ env.IMAGE_NAME_INFERENCE }}:${{ needs.train-model.outputs.model-version }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        outputs: type=docker,dest=/tmp/inference-image.tar
+    
+    - name: Save inference image as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: inference-image
+        path: /tmp/inference-image.tar
+        retention-days: 7
+
+  # Job 3: Тестування моделі
+  test-model:
+    name: Test Model Quality
+    runs-on: ubuntu-latest
+    needs: train-model
+    if: needs.train-model.outputs.training-status == 'success'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download trained model
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.MODEL_ARTIFACT_NAME }}
+        path: ./
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest pytest-html
+    
+    - name: Run model tests
+      run: |
+        python -m pytest tests/ -v --html=test-report.html --self-contained-html
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          test-report.html
+          training.log
+        retention-days: 30
+
+  # Job 4: Performance benchmarking
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    needs: [train-model, build-inference]
+    if: needs.train-model.outputs.training-status == 'success'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download model and image
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.MODEL_ARTIFACT_NAME }}
+        path: ./
+    
+    - name: Load inference image
+      run: |
+        docker load --input /tmp/inference-image.tar
+    
+    - name: Run performance tests
+      id: benchmark
+      run: |
+        # Запускаємо сервер у фоні
+        docker run -d --name inference-server -p 5000:5000 ${{ env.IMAGE_NAME_INFERENCE }}:latest
+        
+        # Чекаємо на готовність сервера
+        timeout 30s bash -c 'until curl -f http://localhost:5000/health; do sleep 1; done'
+        
+        # Запускаємо бенчмарк
+        python benchmark.py --url http://localhost:5000 --output benchmark-results.json
+        
+        # Зупиняємо сервер
+        docker stop inference-server
+        docker rm inference-server
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: |
+          benchmark-results.json
+        retention-days: 30
+
+  # Job 5: Deploy to Registry
+  deploy:
+    name: Deploy to Registry
+    runs-on: ubuntu-latest
+    needs: [train-model, build-inference, test-model, benchmark]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Build and push inference image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile.inference
+        push: true
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_INFERENCE }}:latest
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_INFERENCE }}:${{ needs.train-model.outputs.model-version }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Job 6: Generate Report
+  report:
+    name: Generate Pipeline Report
+    runs-on: ubuntu-latest
+    needs: [train-model, test-model, benchmark]
+    if: always()
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      run: |
+        mkdir -p artifacts
+        # Це симуляція - в реальності потрібно завантажити артефакти
+    
+    - name: Generate Markdown report
+      run: |
+        cat > pipeline-report.md << EOF
+        # ML Pipeline Report
+        ## Execution Summary
+        - **Pipeline ID**: ${{ github.run_id }}
+        - **Trigger**: ${{ github.event_name }}
+        - **Commit**: ${{ github.sha }}
+        - **Timestamp**: $(date -u)
+        
+        ## Job Status
+        - Training: ${{ needs.train-model.result }}
+        - Testing: ${{ needs.test-model.result }}
+        - Benchmark: ${{ needs.benchmark.result }}
+        
+        ## Model Information
+        - Version: ${{ needs.train-model.outputs.model-version }}
+        - Training Status: ${{ needs.train-model.outputs.training-status }}
+        
+        ## Next Steps
+        1. Review test results
+        2. Check benchmark metrics
+        3. Deploy if all checks pass
+        EOF
+    
+    - name: Upload pipeline report
+      uses: actions/upload-artifact@v4
+      with:
+        name: pipeline-report
+        path: pipeline-report.md
+        retention-days: 30
