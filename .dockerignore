@@ -22,7 +22,6 @@ test_*
 *.ipynb
 *.tmp
 temp/
-data/
 training.log
 *.dockerignore
 Dockerfile.single
