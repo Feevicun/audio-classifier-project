@@ -2,26 +2,24 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Minimal system dependencies
 RUN apt-get update && apt-get install -y \
-    libsndfile1 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Copy requirements
+# Copy only necessary files
 COPY requirements.txt .
+COPY train.py .
+COPY class_info.json .
 
-# Install Python dependencies
+# Install only essential packages
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
-
-# Create models directory
-RUN mkdir -p models
-
-# Environment variables
+# Environment for minimal training
 ENV PYTHONPATH=/app
 ENV EPOCHS=2
+ENV SAMPLES_PER_CLASS=10
 
-# Command to train model
 CMD ["python", "train.py"]
