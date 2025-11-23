@@ -21,10 +21,7 @@ wheels/
 *.egg
 
 # Data
-data/
 *.pth
-class_info.json
-training.log
 *.pkl
 *.h5
 *.hdf5
