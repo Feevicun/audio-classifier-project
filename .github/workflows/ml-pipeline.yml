@@ -47,28 +47,26 @@ jobs:
       with:
         fetch-depth: 0
     
-    - name: Debug repository structure
+    - name: Verify data structure
       run: |
-        echo "📁 Repository structure:"
-        find . -name "*.py" -o -name "*.yml" -o -name "Dockerfile*" -o -name "requirements.txt" | head -20
-        echo "🔍 Data directory:"
-        ls -la data/ || echo "No data directory"
-        find data/ -name "*.wav" | head -10 || echo "No WAV files found"
-    
-    - name: Create test data if missing
-      run: |
-        echo "📁 Checking data structure..."
-        if find data/ -name "*.wav" | head -1 > /dev/null; then
-          echo "✅ Real data found"
-          find data/ -name "*.wav" | head -5
+        echo "📁 Перевірка структури даних..."
+        if [ -d "data/SpeechCommands/speech_commands_v0.02" ]; then
+          echo "✅ Знайдено SpeechCommands data"
+          echo "📊 Вміст папки:"
+          ls -la data/SpeechCommands/speech_commands_v0.02/
+          echo "🔍 Файли yes:"
+          ls data/SpeechCommands/speech_commands_v0.02/yes/ | head -3 || echo "No yes files"
+          echo "🔍 Файли no:"
+          ls data/SpeechCommands/speech_commands_v0.02/no/ | head -3 || echo "No no files"
+          echo "🔍 Файли up:"
+          ls data/SpeechCommands/speech_commands_v0.02/up/ | head -3 || echo "No up files"
+          echo "🔍 Файли down:"
+          ls data/SpeechCommands/speech_commands_v0.02/down/ | head -3 || echo "No down files"
         else
-          echo "📝 Creating minimal test data structure..."
-          mkdir -p data/SpeechCommands/speech_commands_v0.02
-          for class_name in yes no up down; do
-            mkdir -p "data/SpeechCommands/speech_commands_v0.02/$class_name"
-            echo "Creating placeholder for $class_name"
-          done
-          echo "⚠️ Using synthetic data for training"
+          echo "❌ SpeechCommands data not found at data/SpeechCommands/speech_commands_v0.02/"
+          echo "📂 Available in data/:"
+          find data/ -type f -name "*.wav" | head -10 || echo "No WAV files found"
+          exit 1
         fi
     
     - name: Set up Docker Buildx
@@ -103,22 +101,35 @@ jobs:
       run: |
         echo "🚀 Starting model training..."
         
-        # Створюємо папку для моделі
-        mkdir -p models
-        
         # Запускаємо тренування з локального образу
         docker run --rm \
-          -v $(pwd)/models:/app/models \
-          -v $(pwd)/data:/app/data \
+          -v $(pwd):/app \
           -e EPOCHS=${{ github.event.inputs.training_epochs || '2' }} \
           train-image:latest
         
-        # Перевіряємо результати тренування
-        if [ -f "models/model.pth" ]; then
-          echo "✅ Model trained successfully"
+        # Перевіряємо результати тренування - ВИПРАВЛЕНА ПЕРЕВІРКА
+        echo "🔍 Checking for model files..."
+        ls -la | grep model.pth || echo "model.pth not found in root"
+        ls -la models/ || echo "models directory not found"
+        
+        if [ -f "model.pth" ]; then
+          echo "✅ Model trained successfully - model.pth found in root"
           echo "training-status=success" >> $GITHUB_OUTPUT
           
           # Отримуємо accuracy з логів
+          if [ -f "training.log" ]; then
+            ACCURACY=$(grep "Accuracy:" training.log | tail -1 | grep -o '[0-9]*\.[0-9]*' | head -1 || echo "0")
+            echo "accuracy=$ACCURACY" >> $GITHUB_OUTPUT
+            echo "📊 Final Accuracy: $ACCURACY%"
+          else
+            echo "accuracy=0" >> $GITHUB_OUTPUT
+          fi
+        elif [ -f "models/model.pth" ]; then
+          echo "✅ Model trained successfully - model.pth found in models/"
+          # Копіюємо модель до кореня для consistency
+          cp models/model.pth model.pth
+          echo "training-status=success" >> $GITHUB_OUTPUT
+          
           if [ -f "training.log" ]; then
             ACCURACY=$(grep "Accuracy:" training.log | tail -1 | grep -o '[0-9]*\.[0-9]*' | head -1 || echo "0")
             echo "accuracy=$ACCURACY" >> $GITHUB_OUTPUT
@@ -138,6 +149,7 @@ jobs:
       with:
         name: ${{ env.MODEL_ARTIFACT_NAME }}
         path: |
+          model.pth
           models/
           class_info.json
           training.log
@@ -164,8 +176,16 @@ jobs:
     - name: Verify model files
       run: |
         echo "🔍 Verifying model artifacts..."
+        ls -la model.pth || echo "model.pth not in root"
         ls -la models/ || echo "No models directory"
         ls -la class_info.json || echo "No class_info.json"
+        
+        # Ensure model.pth exists in root for Docker build
+        if [ ! -f "model.pth" ] && [ -f "models/model.pth" ]; then
+          echo "📦 Copying model.pth from models/ to root"
+          cp models/model.pth model.pth
+        fi
+        
         [ -f "model.pth" ] && echo "✅ model.pth found" || echo "❌ model.pth missing"
         [ -f "class_info.json" ] && echo "✅ class_info.json found" || echo "❌ class_info.json missing"
     
@@ -229,14 +249,17 @@ jobs:
       id: tests
       run: |
         echo "🧪 Running model tests..."
-        python -m pytest tests/ -v --html=test-report.html --self-contained-html || echo "⚠️ Some tests failed but continuing"
         
-        # Check if tests passed
+        # Ensure model.pth is in the right place
+        if [ ! -f "model.pth" ] && [ -f "models/model.pth" ]; then
+          cp models/model.pth model.pth
+        fi
+        
+        python -m pytest tests/ -v --html=test-report.html --self-contained-html
+        
         if [ $? -eq 0 ]; then
-          echo "✅ All tests passed"
           echo "test-status=success" >> $GITHUB_OUTPUT
         else
-          echo "⚠️ Some tests failed"
           echo "test-status=failed" >> $GITHUB_OUTPUT
         fi
     
@@ -472,6 +495,7 @@ jobs:
         echo "Testing: ${{ needs.test-model.result }}" 
         echo "Benchmark: ${{ needs.benchmark.result }}"
         echo "Deployment: ${{ needs.deploy.result || 'N/A' }}"
+        echo "Model Accuracy: ${{ needs.train-model.outputs.accuracy || 'N/A' }}%"
         echo "================================"
         if [ "${{ needs.train-model.result }}" = "success" ] && [ "${{ needs.test-model.result }}" = "success" ]; then
           echo "✅ PIPELINE SUCCESS"
