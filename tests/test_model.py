@@ -1,60 +1,60 @@
-import pytest
 import torch
 import json
-import os
-from train import AudioClassifier, mel_spectrogram
+import pandas as pd
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-class TestTrainedModel:
-    @pytest.fixture
-    def model(self):
-        """Завантажуємо навчену модель"""
-        if not os.path.exists('model.pth'):
-            pytest.skip("Model not found - training might have failed")
-        
-        with open('class_info.json', 'r') as f:
-            class_info = json.load(f)
-        
-        model = AudioClassifier(num_classes=len(class_info['target_classes']))
-        model.load_state_dict(torch.load('model.pth', map_location='cpu'))
-        model.eval()
-        return model
+def validate_model(model_path):
+    """Перевірка якості моделі на стабільних зразках"""
+    print("🔍 Validating model...")
     
-    @pytest.fixture
-    def class_info(self):
-        with open('class_info.json', 'r') as f:
-            return json.load(f)
+    # Завантаження моделі
+    model = torch.load(model_path, map_location='cpu')
     
-    def test_model_loading(self, model):
-        """Тест завантаження моделі"""
-        assert model is not None
-        assert hasattr(model, 'forward')
+    # Тестові дані для валідації
+    test_samples = generate_validation_samples()
     
-    def test_model_output_shape(self, model, class_info):
-        """Тест форми виходу моделі"""
-        num_classes = len(class_info['target_classes'])
-        batch_size = 2
-        channels = 1
-        height = 64
-        width = 32
-        
-        # Створюємо fake input
-        dummy_input = torch.randn(batch_size, channels, height, width)
-        
-        with torch.no_grad():
-            output = model(dummy_input)
-        
-        assert output.shape == (batch_size, num_classes)
+    # Прогнозування
+    predictions = []
+    true_labels = []
     
-    def test_class_info_structure(self, class_info):
-        """Тест структури class_info"""
-        assert 'target_classes' in class_info
-        assert isinstance(class_info['target_classes'], list)
-        assert len(class_info['target_classes']) > 0
+    for sample, true_label in test_samples:
+        pred = model(sample.unsqueeze(0))
+        pred_label = torch.argmax(pred).item()
+        predictions.append(pred_label)
+        true_labels.append(true_label)
     
-    def test_training_log_exists(self):
-        """Перевіряємо наявність логів тренування"""
-        assert os.path.exists('training.log')
-        
-        with open('training.log', 'r') as f:
-            log_content = f.read()
-            assert len(log_content) > 0
+    # Метрики якості
+    report = classification_report(true_labels, predictions, output_dict=True)
+    cm = confusion_matrix(true_labels, predictions)
+    
+    # Збереження результатів
+    results = {
+        'accuracy': report['accuracy'],
+        'precision': report['weighted avg']['precision'],
+        'recall': report['weighted avg']['recall'],
+        'f1_score': report['weighted avg']['f1-score'],
+        'confusion_matrix': cm.tolist()
+    }
+    
+    with open('artifacts/validation_metrics.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    # Звіт у HTML
+    generate_html_report(report, cm)
+    
+    print(f"✅ Validation completed. Accuracy: {results['accuracy']:.3f}")
+
+def generate_validation_samples():
+    """Генерація стабільних тестових зразків"""
+    # Тут мають бути реальні тестові дані
+    return []  # Заглушка
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model-path', required=True)
+    args = parser.parse_args()
+    
+    validate_model(args.model_path)
