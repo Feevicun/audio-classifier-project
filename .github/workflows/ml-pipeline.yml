@@ -144,7 +144,6 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
-        pip install pandas scikit-learn
     
     - name: Validate model with stable samples
       run: |
@@ -153,8 +152,6 @@ jobs:
         python -c "
         import torch
         import json
-        import pandas as pd
-        import numpy as np
         
         print('Loading model...')
         # Завантажуємо модель з інформацією про архітектуру
@@ -218,9 +215,11 @@ jobs:
         with open('artifacts/validation_report.json', 'w') as f:
             json.dump(validation_report, f, indent=2)
         
-        # CSV з результатами
-        df = pd.DataFrame(test_results)
-        df.to_csv('artifacts/validation_results.csv', index=False)
+        # Зберігаємо CSV без pandas
+        with open('artifacts/validation_results.csv', 'w') as f:
+            f.write('sample_id,prediction,confidence,prediction_label\\n')
+            for result in test_results:
+                f.write(f'{result[\"sample_id\"]},{result[\"prediction\"]},{result[\"confidence\"]},{result[\"prediction_label\"]}\\n')
         
         print(f'✅ Validation completed!')
         print(f'📊 Success rate: {validation_report[\"success_rate\"]:.1%}')
@@ -259,6 +258,11 @@ jobs:
         echo "🔨 Building inference image for benchmark..."
         docker build -f docker/Dockerfile.inference -t inference-image:latest .
     
+    - name: Install benchmark dependencies
+      run: |
+        echo "📦 Installing benchmark dependencies..."
+        pip install requests
+    
     - name: Run latency benchmark
       run: |
         echo "⚡ Running performance benchmark..."
@@ -270,13 +274,12 @@ jobs:
         echo "⏳ Waiting for server to start..."
         sleep 15
         
-        # Запускаємо latency тест
+        # Запускаємо latency тест без pandas
         python -c "
         import requests
         import time
         import json
         import statistics
-        import pandas as pd
         
         print('Starting latency tests...')
         latencies = []
@@ -331,14 +334,13 @@ jobs:
         with open('benchmark_metrics.json', 'w') as f:
             json.dump(metrics, f, indent=2)
         
-        # Зберігаємо raw data
+        # Зберігаємо raw data без pandas
         if latencies:
-            df = pd.DataFrame({
-                'request_id': range(1, len(latencies) + 1),
-                'latency_ms': latencies,
-                'status_code': [200] * len(latencies)
-            })
-            df.to_csv('latency_data.csv', index=False)
+            with open('latency_data.csv', 'w') as f:
+                f.write('request_id,latency_ms,status_code\\n')
+                for i, latency in enumerate(latencies, 1):
+                    f.write(f'{i},{latency:.2f},200\\n')
+            print('📁 Latency data saved to CSV')
         "
         
         # Зупиняємо сервер
