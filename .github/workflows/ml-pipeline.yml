@@ -356,7 +356,7 @@ jobs:
           latency_data.csv
         retention-days: 30
 
-  # Job 4: Деплой в GitHub Container Registry (FIXED)
+  # Job 4: Деплой в GitHub Container Registry
   deploy-to-registry:
     name: Deploy to GitHub Container Registry
     runs-on: ubuntu-latest
@@ -421,7 +421,7 @@ jobs:
         echo "📦 Versioned: ${{ env.REGISTRY }}/$IMAGE_NAME:$MODEL_VERSION"
         echo "🎯 Model Accuracy: ${{ needs.train-and-build.outputs.accuracy }}%"
     
-    - name: Save deployment info (FIXED)
+    - name: Save deployment info
       run: |
         echo "DEPLOYMENT_INFO<<EOF" >> $GITHUB_ENV
         echo "## 🚀 Deployment Successful" >> $GITHUB_ENV
@@ -512,22 +512,32 @@ jobs:
         path: pipeline_report.md
         retention-days: 90
 
-  # Job 6: Status check для MR (блокування мерджа)
+  # Job 6: Status check для MR (блокування мерджа) - FIXED
   status-check:
     name: Required Status Check
     runs-on: ubuntu-latest
     needs: [train-and-build, model-validation, benchmark-and-test]
-    if: always() && github.event_name == 'pull_request'
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'workflow_dispatch')
     
     steps:
-    - name: Determine MR status
+    - name: Determine pipeline status
       run: |
-        echo "🔍 Checking pipeline status for Merge Request..."
+        echo "🔍 Checking pipeline status..."
         
-        if [ "${{ needs.train-and-build.result }}" = "success" ] && \
-           [ "${{ needs.model-validation.result }}" = "success" ] && \
-           [ "${{ needs.benchmark-and-test.result }}" = "success" ]; then
-          echo "✅ All checks passed - MR can be merged"
+        TRAINING_RESULT="${{ needs.train-and-build.result }}"
+        VALIDATION_RESULT="${{ needs.model-validation.result }}"
+        BENCHMARK_RESULT="${{ needs.benchmark-and-test.result }}"
+        
+        echo "Training: $TRAINING_RESULT"
+        echo "Validation: $VALIDATION_RESULT" 
+        echo "Benchmark: $BENCHMARK_RESULT"
+        
+        if [ "$TRAINING_RESULT" = "success" ] && \
+           [ "$VALIDATION_RESULT" = "success" ] && \
+           [ "$BENCHMARK_RESULT" = "success" ]; then
+          echo "✅ All checks passed - Pipeline successful"
           echo "## ✅ All Pipeline Checks Passed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Quality Gates Status:" >> $GITHUB_STEP_SUMMARY
@@ -535,17 +545,29 @@ jobs:
           echo "- ✅ Model Validation: Passed" >> $GITHUB_STEP_SUMMARY  
           echo "- ✅ Performance Benchmark: Completed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**This merge request can be safely merged.**" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "**This merge request can be safely merged.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Pipeline completed successfully. Ready for deployment.**" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           exit 0
         else
-          echo "❌ Some checks failed - MR cannot be merged"
-          echo "## ❌ Pipeline Checks Failed - MR Blocked" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Some checks failed"
+          echo "## ❌ Pipeline Checks Failed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Failed Jobs:" >> $GITHUB_STEP_SUMMARY
-          echo "- Model Training: ${{ needs.train-and-build.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Model Validation: ${{ needs.model-validation.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Benchmark: ${{ needs.benchmark-and-test.result }}" >> $GITHUB_STEP_SUMMARY
+          [ "$TRAINING_RESULT" != "success" ] && echo "- ❌ Model Training: $TRAINING_RESULT" >> $GITHUB_STEP_SUMMARY
+          [ "$VALIDATION_RESULT" != "success" ] && echo "- ❌ Model Validation: $VALIDATION_RESULT" >> $GITHUB_STEP_SUMMARY
+          [ "$BENCHMARK_RESULT" != "success" ] && echo "- ❌ Performance Benchmark: $BENCHMARK_RESULT" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**This merge request cannot be merged until all checks pass.**" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "**This merge request cannot be merged until all checks pass.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Pipeline failed. Please check the errors above.**" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           exit 1
         fi
