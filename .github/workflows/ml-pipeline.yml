@@ -421,7 +421,7 @@ jobs:
         echo "📦 Versioned: ${{ env.REGISTRY }}/$IMAGE_NAME:$MODEL_VERSION"
         echo "🎯 Model Accuracy: ${{ needs.train-and-build.outputs.accuracy }}%"
     
-    - name: Save deployment info
+    - name: Save deployment info (FIXED)
       run: |
         echo "DEPLOYMENT_INFO<<EOF" >> $GITHUB_ENV
         echo "## 🚀 Deployment Successful" >> $GITHUB_ENV
@@ -433,7 +433,7 @@ jobs:
         echo "**Model Metrics:**" >> $GITHUB_ENV
         echo "- Accuracy: ${{ needs.train-and-build.outputs.accuracy }}%" >> $GITHUB_ENV
         echo "- Model Version: ${{ needs.train-and-build.outputs.model-version }}" >> $GITHUB_ENV
-        echo "EOF"
+        echo "EOF" >> $GITHUB_ENV
 
   # Job 5: Генерація комплексного звіту
   generate-report:
